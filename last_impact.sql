@@ -1,67 +1,65 @@
-WITH full_year_target AS (
+WITH FullYearTarget AS (
     SELECT 
-        patient_id,
+        MemberID,
         ReportAnchorDate,
-        Numerator AS ytd_numerator,
-        Denominator AS ytd_denominator,
+        CurrentNumerator,
+        CurrentDenominator,
         FirstFillDate,
-        LastFillDate,
-        LastDaysSupply,
+        PdcAdjustedEndDate, -- The true end date of coverage after accounting for overlaps
         -- 1. Project the full year denominator (First Fill to Dec 31)
-        DATE_DIFF('2026-12-31', FirstFillDate, DAY) + 1 AS full_year_denominator,
+        DATE_DIFF('2026-12-31', FirstFillDate, DAY) + 1 AS FullYearDenominator,
         -- 2. Calculate absolute target days needed for 80% Stars adherence
-        CEIL(0.80 * (DATE_DIFF('2026-12-31', FirstFillDate, DAY) + 1)) AS req_covered_days
-    FROM your_adherence_ytd_table
+        CEIL(0.80 * (DATE_DIFF('2026-12-31', FirstFillDate, DAY) + 1)) AS RequiredCoveredDays
+    FROM YourAdherenceYtdTable
 ),
 
-adherence_deficit AS (
+AdherenceDeficit AS (
     SELECT 
         *,
         -- 3. Determine remaining days needed to hit the 80% threshold
-        GREATEST(0, req_covered_days - ytd_numerator) AS days_needed,
+        GREATEST(0, RequiredCoveredDays - CurrentNumerator) AS DaysNeeded,
         
-        -- 4. Account for medication still in hand past the anchor date.
-        -- NOTE: If your PDC pipeline outputs an 'Adjusted_End_Date' for the last fill, use that instead.
-        GREATEST(0, DATE_DIFF(DATE_ADD(LastFillDate, INTERVAL LastDaysSupply DAY), ReportAnchorDate, DAY)) AS days_supply_on_hand,
+        -- 4. Calculate supply on hand using the pipeline's Adjusted End Date
+        GREATEST(0, DATE_DIFF(PdcAdjustedEndDate, ReportAnchorDate, DAY)) AS DaysSupplyOnHand,
         
         -- Total calendar days left in the year from the anchor date
-        DATE_DIFF('2026-12-31', ReportAnchorDate, DAY) AS calendar_days_remaining
-    FROM full_year_target
+        DATE_DIFF('2026-12-31', ReportAnchorDate, DAY) AS CalendarDaysRemaining
+    FROM FullYearTarget
 ),
 
-timeline_calculations AS (
+TimelineCalculations AS (
     SELECT 
         *,
         -- 5. Back into the last impact date from December 31st
-        DATE_SUB('2026-12-31', INTERVAL (days_needed - days_supply_on_hand - 1) DAY) AS calculated_last_impact_date
-    FROM adherence_deficit
+        DATE_SUB('2026-12-31', INTERVAL (DaysNeeded - DaysSupplyOnHand - 1) DAY) AS CalculatedLastImpactDate
+    FROM AdherenceDeficit
 )
 
 SELECT 
-    patient_id,
+    MemberID,
     ReportAnchorDate,
-    ytd_numerator,
-    req_covered_days,
-    days_needed,
-    days_supply_on_hand,
+    CurrentNumerator,
+    RequiredCoveredDays,
+    DaysNeeded,
+    DaysSupplyOnHand,
     -- 6. Apply business guardrails for reporting
     CASE 
         -- Case A: Patient has already locked in 80% adherence for the year
-        WHEN days_needed = 0 THEN '2026-12-31' 
+        WHEN DaysNeeded = 0 THEN '2026-12-31' 
         
         -- Case B: Days supply on hand already satisfies the remaining deficit
-        WHEN days_supply_on_hand >= days_needed THEN '2026-12-31'
+        WHEN DaysSupplyOnHand >= DaysNeeded THEN '2026-12-31'
         
         -- Case C: Mathematically impossible to reach 80% even if filled today
-        WHEN (days_needed - days_supply_on_hand) > calendar_days_remaining THEN NULL 
+        WHEN (DaysNeeded - DaysSupplyOnHand) > CalendarDaysRemaining THEN NULL 
         
         -- Case D: Valid actionable Last Impact Date
-        ELSE calculated_last_impact_date
-    END AS last_impact_date,
+        ELSE CalculatedLastImpactDate
+    END AS LastImpactDate,
     
     CASE 
-        WHEN days_needed = 0 OR days_supply_on_hand >= days_needed THEN 'Adherence Achieved'
-        WHEN (days_needed - days_supply_on_hand) > calendar_days_remaining THEN 'Opportunity Missed'
+        WHEN DaysNeeded = 0 OR DaysSupplyOnHand >= DaysNeeded THEN 'Adherence Achieved'
+        WHEN (DaysNeeded - DaysSupplyOnHand) > CalendarDaysRemaining THEN 'Opportunity Missed'
         ELSE 'Actionable'
-    END AS adherence_status
-FROM timeline_calculations;
+    END AS AdherenceStatus
+FROM TimelineCalculations;
