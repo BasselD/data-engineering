@@ -1,3 +1,86 @@
+/*
+/* Metrics & Adherence */
+
+, PDC.AdherenceMeasure AS AdherenceMeasure
+, PDC.NumUnadj AS CurrentNumerator
+, PDC.DenUnadj AS CurrentDenominator
+
+/* Current PDC */
+, (1.00 * CurrentNumerator) / NULLIF(CurrentDenominator, 0) AS CurrentPDC
+
+/* Key Dates */
+, CAST(PDC.PDC_RunDate AS DATE) AS PDCCalculationDate
+
+, CAST(CAST(YEAR(DATE) AS VARCHAR(4)) || '-12-31' AS DATE) AS YearEndDate
+
+/* Treatment Span */
+, CurrentDenominator AS TreatmentSpanDays
+
+/* Current adherence math */
+, CAST(FLOOR(TreatmentSpanDays * 0.80) AS INT) AS RequiredAdherenceDays
+
+, CAST(FLOOR(TreatmentSpanDays * 0.20) AS INT) AS DaysCanBeMissed
+
+, CAST(CurrentDenominator - CurrentNumerator AS INT) AS DaysAlreadyMissed
+
+, GREATEST(DaysCanBeMissed - DaysAlreadyMissed, 0) AS DaysRemaining
+
+/* Medication on hand */
+/* LastFillDateAdjusted is assumed to be the overlap-adjusted fill start date */
+, CAST(PDC.LastFillAdjusted AS DATE) AS LastFillDateAdjusted
+
+, CAST(RNKR.LastDS AS INT) AS LastDaysSupply
+
+, LastFillDateAdjusted + LastDaysSupply - 1 AS MedicationRunoutDate
+
+/* Future covered days already available after the report anchor date */
+, GREATEST(MedicationRunoutDate - PDCCalculationDate, 0) AS MedicationRunoutDays
+
+/* Covered days after counting medication already on hand */
+, CurrentNumerator + MedicationRunoutDays AS CoveredDaysWithRunout
+
+/* Year-end denominator */
+, CurrentDenominator + (YearEndDate - PDCCalculationDate) AS YearEndDenominator
+
+/* Year-end PDC after counting current medication on hand */
+, CAST(CoveredDaysWithRunout AS FLOAT) 
+    / NULLIF(YearEndDenominator, 0) AS YearEndPDCWithRunout
+
+/* Days still needed to hit 80% by year-end after counting current medication on hand */
+, GREATEST(
+      CEILING(YearEndDenominator * 0.80) - CoveredDaysWithRunout,
+      0
+  ) AS RequiredDaysForAdherence
+
+/* Maximum possible adherence if perfectly covered from report date to year-end */
+, CurrentNumerator + (YearEndDate - PDCCalculationDate) AS MaxPotentialNumerator
+
+, YearEndDenominator AS MaxPotentialDenominator
+
+, CAST(MaxPotentialNumerator AS FLOAT) 
+    / NULLIF(MaxPotentialDenominator, 0) AS MaxPotentialPDC
+
+/* Recoverability */
+, CASE
+      WHEN MaxPotentialPDC < 0.80 THEN 0
+      ELSE 1
+  END AS RecoverableFlag
+
+/* Last Impact Date */
+/* Latest date member must resume continuous coverage to still reach 80% by year-end */
+, CASE
+      WHEN RecoverableFlag = 0 THEN NULL
+      WHEN RequiredDaysForAdherence = 0 THEN NULL
+      ELSE YearEndDate - RequiredDaysForAdherence + 1
+  END AS LastImpactDate
+
+/* Days until last impact */
+, CASE
+      WHEN LastImpactDate IS NULL THEN NULL
+      ELSE LastImpactDate - PDCCalculationDate
+  END AS DaysUntilUnrecoverable
+*/
+
 WITH FullYearTarget AS (
     SELECT 
         MemberID,
